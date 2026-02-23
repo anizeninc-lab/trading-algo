@@ -3,87 +3,64 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Survivor Algo - Trading Dashboard</title>
+    <title>Trading Unified Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Outfit:wght@100..900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Zero Telemetry: No Google Analytics or third-party tracking scripts attached -->
 </head>
-<body class="dark-mode">
+<body>
     <div class="app-container">
+        <!-- Global Header -->
         <header>
             <div class="logo">
-                <span class="highlight">SURVIVOR</span> ALGO
+                algo<span class="highlight">Trade</span>
             </div>
             <div class="header-stats">
                 <div class="stat-item">
-                    <span class="label">Total P&L</span>
-                    <span id="header-pnl" class="value positive">₹0.00</span>
+                    <span class="label">Total Net P&L</span>
+                    <span class="value positive" id="global-pnl">₹0.00</span>
                 </div>
                 <div class="stat-item">
-                    <span class="label">Status</span>
-                    <span class="value status-live">Backtest Complete</span>
+                    <span class="label">System Health</span>
+                    <span class="value" id="system-health">Healthy</span>
+                </div>
+                <div class="stat-item">
+                    <span class="label">Brokers</span>
+                    <span class="value highlight" id="broker-status">Checking...</span>
                 </div>
             </div>
         </header>
 
-        <main>
-            <section class="overview">
-                <div class="card pnl-card">
-                    <h3>Equity Curve</h3>
-                    <canvas id="equityChart"></canvas>
-                </div>
-                <div class="grid-stats">
-                    <div class="card stat-card">
-                        <span class="label">Initial Capital</span>
-                        <span id="initial-capital" class="value">₹1,00,000</span>
-                    </div>
-                    <div class="card stat-card">
-                        <span class="label">Final Equity</span>
-                        <span id="final-equity" class="value">₹1,00,000</span>
-                    </div>
-                    <div class="card stat-card">
-                        <span class="label">Total Trades</span>
-                        <span id="total-trades" class="value">0</span>
-                    </div>
-                    <div class="card stat-card">
-                        <span class="label">Win Rate</span>
-                        <span id="win-rate" class="value">0%</span>
-                    </div>
-                </div>
-            </section>
+        <!-- Strategy Control Panels -->
+        <div class="overview" id="strategies-grid">
+            <!-- Dynamically populated by JS via WebSocket state stream -->
+        </div>
 
-            <section class="trades-listing">
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Trade History</h3>
-                        <div class="filters">
-                            <input type="text" id="trade-search" placeholder="Search symbol...">
-                        </div>
-                    </div>
-                    <div class="table-container">
-                        <table id="trades-table">
-                            <thead>
-                                <tr>
-                                    <th>Time</th>
-                                    <th>Symbol</th>
-                                    <th>Type</th>
-                                    <th>Qty</th>
-                                    <th>Price</th>
-                                    <th>Value</th>
-                                    <th>Tag</th>
-                                </tr>
-                            </thead>
-                            <tbody id="trades-body">
-                                <!-- Trades will be injected here -->
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </section>
-        </main>
+        <!-- Trade Log Table -->
+        <div class="card" style="margin-top: 2rem;">
+            <div class="card-header">
+                <h3>Recent Trade Activity</h3>
+            </div>
+            <div class="table-container">
+                <table id="trade-log">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Strategy</th>
+                            <th>Status</th>
+                            <th>Current Position</th>
+                            <th>Unrealized P&L</th>
+                            <th>Realized P&L</th>
+                        </tr>
+                    </thead>
+                    <tbody id="trade-tbody">
+                        <!-- Populated by websocket state -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
-    <script src="script.js"></script>
+
+    <script src="app.js"></script>
 </body>
 </html>

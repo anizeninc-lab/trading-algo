@@ -5,99 +5,67 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import yaml
 from logger import logger
 from brokers import BrokerGateway, OrderRequest, Exchange, OrderType, TransactionType, ProductType
+from .base import BaseStrategy
 
-class SurvivorStrategy:
+class SurvivorStrategy(BaseStrategy):
     """
-    Survivor Options Trading Strategy
-    
-    This strategy implements a systematic approach to options trading based on price movements
-    of the NIFTY index. The core concept is to sell options (both PE and CE) when the underlying
-    index moves beyond certain thresholds, capturing premium decay while managing risk through
-    dynamic gap adjustments.
-    
-    STRATEGY OVERVIEW:
-    ==================
-    
-    1. **Dual-Side Trading**: The strategy monitors both upward and downward movements:
-       - PE (Put) Trading: Triggered when NIFTY price moves UP beyond pe_gap threshold
-       - CE (Call) Trading: Triggered when NIFTY price moves DOWN beyond ce_gap threshold
-    
-    2. **Gap-Based Execution**: 
-       - Maintains reference points (nifty_pe_last_value, nifty_ce_last_value)
-       - Executes trades when price deviates beyond configured gaps
-       - Uses multipliers to scale position sizes based on gap magnitude
-    
-    3. **Dynamic Strike Selection**:
-       - Selects option strikes based on symbol_gap from current price
-       - Adjusts strikes if option premium is below minimum threshold
-       - Ensures adequate liquidity and pricing
-    
-    4. **Reset Mechanism**:
-       - Automatically adjusts reference points when market moves favorably
-       - Prevents excessive accumulation of positions
-       - Maintains strategy responsiveness to market conditions
-    
-    TRADING LOGIC EXAMPLE:
-    =====================
-    
-    Scenario: NIFTY at 24,500, pe_gap=25, pe_symbol_gap=200
-    
-    1. Initial State: nifty_pe_last_value = 24,500
-    2. NIFTY rises to 24,530 (difference = 30)
-    3. Since 30 > pe_gap(25), trigger PE sell
-    4. Sell multiplier = 30/25 = 1 (rounded down)
-    5. Select PE strike at 24,500-200 = 24,300 PE
-    6. Update reference: nifty_pe_last_value = 24,525 (24,500 + 25*1)
-    
-    CONFIGURATION PARAMETERS:
-    ========================
-    
-    Core Parameters:
-    - symbol_initials: Option series identifier (e.g., 'NIFTY25JAN30')
-    - index_symbol: Underlying index for tracking (e.g., 'NSE:NIFTY 50')
-    
-    Gap Parameters:
-    - pe_gap/ce_gap: Price movement thresholds to trigger trades
-    - pe_symbol_gap/ce_symbol_gap: Strike distance from current price
-    - pe_reset_gap/ce_reset_gap: Favorable movement thresholds for reference reset
-    
-    Quantity & Risk:
-    - pe_quantity/ce_quantity: Base quantities for each trade
-    - min_price_to_sell: Minimum option premium threshold
-    - sell_multiplier_threshold: Maximum position scaling limit
-    
-    RISK MANAGEMENT:
-    ===============
-    
-    1. **Premium Filtering**: Only sells options above min_price_to_sell
-    2. **Position Scaling**: Limits multiplier to prevent oversized positions
-    3. **Strike Adjustment**: Dynamically adjusts strikes for adequate premium
-    4. **Reset Logic**: Prevents runaway reference point drift
-
-    PS: This will only work with Zerodha broker out of the box. For Fyers, there needs to be some straight forward changes to get quotes, place orders etc.
+    Survivor Options Trading Strategy (Refactored for Unified Hub)
     """
     
-    def __init__(self, broker, config, order_tracker):
+    def __init__(self, broker, config):
+        # Pass to the unified base
+        super().__init__("Survivor", broker, config)
+        
         # Assign config values as instance variables with 'strat_var_' prefix
         for k, v in config.items():
             setattr(self, f'strat_var_{k}', v)
-        # External dependencies
-        self.broker = broker
+            
         self.symbol_initials = config.get('symbol_initials', 'NIFTY')
-        self.order_tracker = order_tracker  # Store OrderTracker
+        self.strike_difference = None      
+        self.lot_size = 50 # Default safe fallback
+        
+        # SL and TP levels from config (rupee value per lot)
+        self.stop_loss = float(config.get('stop_loss', 0))
+        self.take_profit = float(config.get('take_profit', 0))
+        self.active_positions = {}
+
+    def on_start(self):
+        """Called automatically by start() in the base class"""
+        self._update_signal("Connecting broker & pre-fetching instruments...")
         self.broker.download_instruments()
         self.instruments = self.broker.get_instruments()
-        self.instruments = self.instruments[self.instruments['symbol'].str.contains(self.symbol_initials)]
+        if type(self.instruments) == list:
+             # handle if broker returns plain dicts instead of pandas (eg our naked integration)
+             self.instruments = [i for i in self.instruments if self.symbol_initials in str(i)]
+        else:
+             self.instruments = self.instruments[self.instruments['symbol'].str.contains(self.symbol_initials)]
 
-        if self.instruments.shape[0] == 0:
-            logger.error(f"No instruments found for {self.symbol_initials}")
-            return
-        
-        print(f"DEBUG: First 5 instruments for {self.symbol_initials}:")
-        print(self.instruments.head().to_string())
-        
-        self.strike_difference = None      
         self._initialize_state()
+        self.strike_difference = self._get_strike_difference(self.symbol_initials)
+
+    async def on_tick(self):
+        """Asynchronous execution block called rapidly by the base class manager"""
+        # Fetch current price natively via broker wrapper
+        current_quote = self._nifty_quote()
+        current_price = getattr(current_quote, 'last_price', current_quote.get('last_price', 0)) if isinstance(current_quote, dict) else current_quote.last_price
+        
+        if current_price <= 0:
+            return
+
+        # Core logic execution
+        self._check_sl_tp(current_price)
+        self._handle_pe_trade(current_price) 
+        self._handle_ce_trade(current_price)
+        self._reset_reference_values(current_price)
+        
+        # Publish update state metrics to dashboard
+        self._update_metrics(current_price)
+
+    def _update_metrics(self, price):
+        self.state.unrealized_pnl = 0.0 # Calculate from active positions
+        self.state.realized_pnl = 0.0
+        self.state.open_trades = len(self.active_positions)
+        self.state.current_position = f"Tracking | NIFTY: {price}"
         self.lot_size = self.instruments['lot_size'].iloc[0] if not self.instruments.empty else 50
         
         # Calculate and store strike difference for the option series

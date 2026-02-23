@@ -1,91 +1,86 @@
-
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml
 from logger import logger
-# from brokers.zerodha import ZerodhaBroker
 from brokers import BrokerGateway, OrderRequest, Exchange, OrderType, TransactionType, ProductType
 import datetime
 import time
-import yaml
 import logging
 from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 load_dotenv()
 import mibian 
+from .base import BaseStrategy
 
-class WaveStrategy:
-    """Main trading system that implements wave trading strategy"""
+class WaveStrategy(BaseStrategy):
+    """Main trading system that implements wave trading strategy (Refactored for Unified Hub)"""
     
-    def __init__(self, config: Dict, broker, order_tracker=None):
+    def __init__(self, broker, config: Dict):
+        super().__init__("Wave Extractor", broker, config)
         # Core configuration
-        self.config = config
         self.symbol_name = config["exchange"] + ":" + config.get("symbol_name", None)
         self.buy_gap = float(config["buy_gap"])
         self.sell_gap = float(config["sell_gap"])
         self.cool_off_time = int(config["cool_off_time"])
         self.buy_quantity = int(config["buy_quantity"])
         self.sell_quantity = int(config["sell_quantity"])
-        self.quantity = self.sell_quantity # TODO: Confirm with Vibhu - we are doing this in initilise function
+        self.quantity = self.sell_quantity
         self.product_type = config.get("product_type", "NRML")
         self.tag = config.get("tag", "WAVE_SCRAPER")
         self.order_type = config.get("order_type", "LIMIT")
         self.variety = config.get("variety", "REGULAR")
-        self.lot_size = int(config.get("lot_size", None))
+        self.lot_size = int(config.get("lot_size", 1))
         
-        # Order tracking
-        self.order_tracker = order_tracker
-
-
         # For Greeks Calculation
         self.min_nifty_delta = float(config.get("min_nifty_delta", -100))
         self.max_nifty_delta = float(config.get("max_nifty_delta", 100))
         self.min_bank_nifty_delta = float(config.get("min_bank_nifty_delta", -100))
         self.max_bank_nifty_delta = float(config.get("max_bank_nifty_delta", 100))
-        self.interest_rate = float(config.get("interest_rate", 10)) # Default 10%
-        self.todays_volatility = float(config.get("todays_volatility", 20)) # Default 20%
-        self.delta_calculation_days = int(config.get("delta_calculation_days", 10)) # Setting this to None will mimic restrict_days = False# 
-        self.margin_spread = float(config.get("margin_spread", 100))
-        self.margin_single_pe_ce = float(config.get("margin_single_pe_ce", 100))
-        self.margin_both_pe_ce = float(config.get("margin_both_pe_ce", 100))
+        self.interest_rate = float(config.get("interest_rate", 10))
+        self.todays_volatility = float(config.get("todays_volatility", 20))
+        self.delta_calculation_days = int(config.get("delta_calculation_days", 10))
         
         # System state
-        self.broker = broker
         self.scraper_last_price = 0
         self.already_executing_order = 0
         self.initial_positions = {}
-        self.orders = {}  # Active orders tracking
-        
-        # Generate multiplier scale for gap scaling
+        self.orders = {}
         self.multiplier_scale = self._generate_multiplier_scale()
-        
-        # Initialize broker and get initial position
-        logger.info("Downloading instruments...")
+
+    def on_start(self):
+        logger.info("Initializing Wave Extractor dependencies...")
         self.broker.download_instruments() 
         self.all_instruments = self.broker.get_instruments() 
-        
         self.initial_positions['position'] = self._get_position_for_symbol()
         
-        # Get initial market price
         quote = self.broker.get_quote(self.symbol_name)
-        self.scraper_last_price = quote.last_price
+        self.scraper_last_price = getattr(quote, 'last_price', quote.get('last_price', 0)) if isinstance(quote, dict) else quote.last_price
 
-        # Get the previous wave sell price
         self.prev_wave_sell_price = None
         self.prev_wave_buy_price = None
         self.prev_quote_price = None
+        self.state.last_signal = "Initialized, awaiting market entry."
 
-        self.prev_wave_sell_qty = None
-        self.prev_wave_buy_qty = None
-
-        self.handle_order_update_call_tracker = {}
-        self.handle_order_update_call_tracker_response_dict = {}
-
-        
-        logger.info(f"System initialized for {self.symbol_name}")
-        logger.info(f"Initial position: {self.initial_positions['position']}, Last Price: {self.scraper_last_price}")
+    async def on_tick(self):
+         """Main asynchronous execution bound to BaseStrategy interval"""
+         if self.already_executing_order > 0:
+             return
+             
+         try:
+             # Validate Delta limits explicitly and queue cycle execution
+             self.check_and_enforce_restrictions_on_active_orders()
+             
+             if not self.check_is_any_order_active():
+                  # Execute logic synchronosly in the loop for this strategy 
+                  # (Can be threaded heavily as needed later)
+                  self.place_wave_order()
+                  self._update_signal("Wave bounds recalculated & orders rotated.")
+                  
+         except Exception as e:
+             logger.error(f"Wave Executor fault bounds: {e}")
+             self._update_signal(f"Exception Caught: {e}")
 
     def _generate_multiplier_scale(self, levels: int = 10) -> Dict[str, List[float]]:
         """Generate multiplier scale for dynamic gap scaling based on position imbalance"""
