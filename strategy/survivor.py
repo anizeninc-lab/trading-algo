@@ -83,7 +83,7 @@ class SurvivorStrategy:
             setattr(self, f'strat_var_{k}', v)
         # External dependencies
         self.broker = broker
-        self.symbol_initials = self.strat_var_symbol_initials
+        self.symbol_initials = config.get('symbol_initials', 'NIFTY')
         self.order_tracker = order_tracker  # Store OrderTracker
         self.broker.download_instruments()
         self.instruments = self.broker.get_instruments()
@@ -91,16 +91,23 @@ class SurvivorStrategy:
 
         if self.instruments.shape[0] == 0:
             logger.error(f"No instruments found for {self.symbol_initials}")
-            logger.error(f"Instument {self.symbol_initials} not found. Please check the symbol initials")
             return
+        
+        print(f"DEBUG: First 5 instruments for {self.symbol_initials}:")
+        print(self.instruments.head().to_string())
         
         self.strike_difference = None      
         self._initialize_state()
-        self.lot_size = self.instruments['lot_size'].iloc[0]
+        self.lot_size = self.instruments['lot_size'].iloc[0] if not self.instruments.empty else 50
         
         # Calculate and store strike difference for the option series
         self.strike_difference = self._get_strike_difference(self.symbol_initials)
         logger.info(f"Strike difference for {self.symbol_initials} is {self.strike_difference}")
+
+        # SL and TP levels from config (rupee value per lot)
+        self.stop_loss = float(config.get('stop_loss', 0))
+        self.take_profit = float(config.get('take_profit', 0))
+        self.active_positions = {} # Tracks entry prices for SL/TP
 
     def _nifty_quote(self):
         symbol_code = self.strat_var_index_symbol
@@ -136,6 +143,17 @@ class SurvivorStrategy:
         logger.info(f"Nifty PE Start Value during initialization: {self.nifty_pe_last_value}, "
                    f"Nifty CE Start Value during initialization: {self.nifty_ce_last_value}")
 
+    def refresh_instruments(self):
+        """
+        Refreshes the instrument list and strike difference.
+        Useful for backtesting across multiple expiries.
+        """
+        self.broker.download_instruments()
+        self.instruments = self.broker.get_instruments()
+        self.instruments = self.instruments[self.instruments['symbol'].str.contains(self.symbol_initials)]
+        self.strike_difference = self._get_strike_difference(self.symbol_initials)
+        logger.info(f"Refreshed instruments for {self.symbol_initials}. Strike diff: {self.strike_difference}")
+
     def _get_strike_difference(self, symbol_initials):
         if self.strike_difference is not None:
             return self.strike_difference
@@ -147,7 +165,7 @@ class SurvivorStrategy:
         ]
         
         if ce_instruments.shape[0] < 2:
-            logger.error(f"Not enough CE instruments found for {symbol_initials} to calculate strike difference")
+            logger.error(f"Not enough CE instruments found for {self.symbol_initials} to calculate strike difference")
             return 0
         # Sort by strike
         ce_instruments_sorted = ce_instruments.sort_values('strike')
@@ -160,26 +178,23 @@ class SurvivorStrategy:
     def on_ticks_update(self, ticks):
         """
         Main strategy execution method called on each tick update
-        
-        Args:
-            ticks (dict): Market data containing 'last_price' and other tick information
-            
-        This is the core method that:
-        1. Extracts current price from tick data
-        2. Evaluates PE trading opportunities
-        3. Evaluates CE trading opportunities  
-        4. Applies reset logic for reference values
-        
-        Called externally by the main trading loop when new market data arrives
         """
         current_price = ticks['last_price'] if 'last_price' in ticks else ticks['ltp']
         
+        # SL / TP Check (Simple placeholder for backtest)
+        # In a real scenario, this would check individual option LTPs
+        self._check_sl_tp(current_price)
+
         # Process trading opportunities for both sides
         self._handle_pe_trade(current_price)  # Handle Put option opportunities
         self._handle_ce_trade(current_price)  # Handle Call option opportunities
         
         # Apply reset logic to adjust reference values
         self._reset_reference_values(current_price)
+
+    def _check_sl_tp(self, current_price):
+        # Tracking logic for SL/TP can be added here
+        pass
 
     def _check_sell_multiplier_breach(self, sell_multiplier):
         """
@@ -224,9 +239,9 @@ class SurvivorStrategy:
         - Difference: 60, Multiplier: 60/25 = 2
         - Sell 2x PE quantity, Update reference to 24,550
         """
+    def _handle_pe_trade(self, current_price):
         # No action needed if price hasn't moved up sufficiently
         if current_price <= self.nifty_pe_last_value:
-            self._log_stable_market(current_price)
             return
 
         # Calculate price difference and check if it exceeds gap threshold
@@ -248,34 +263,45 @@ class SurvivorStrategy:
 
             # Find suitable PE option with adequate premium
             temp_gap = self.strat_var_pe_symbol_gap
-            while True:
+            max_iterations = 10
+            iterations = 0
+            instrument = None # Initialize instrument to None
+            while iterations < max_iterations:
+                iterations += 1
                 # Find PE instrument at specified gap from current price
                 instrument = self._find_nifty_symbol_from_gap("PE", current_price, gap=temp_gap)
                 if not instrument:
-                    logger.warning("No suitable instrument found for PE with gap %s", temp_gap)
-                    return 
+                    logger.warning(f"No suitable instrument found for PE with gap {temp_gap}")
+                    break # Break if no instrument is found
                 
                 # Get current quote for the selected instrument
-                if ":" not in instrument['symbol']:
-                    symbol_code = self.strat_var_exchange + ":" + instrument['symbol']
-                else:
-                    symbol_code = instrument['symbol']
+                symbol_code = instrument['symbol']
                 quote = self.broker.get_quote(symbol_code)
                 
                 # Check if premium meets minimum threshold
                 if quote.last_price < self.strat_var_min_price_to_sell:
                     logger.info(f"Last price {quote.last_price} is less than min price to sell {self.strat_var_min_price_to_sell}")
                     # Try closer strike if premium is too low
-                    temp_gap -= self.lot_size
+                    temp_gap -= self._get_strike_difference(self.symbol_initials)
+                    if temp_gap < 0:
+                        logger.warning(f"Gap reduced below 0 for PE, skipping trade")
+                        break
                     continue
-                    
-                # Execute the trade
-                logger.info(f"Execute PE sell @ {instrument['symbol']} × {total_quantity}, Market Price")
-                self._place_order(instrument['symbol'], total_quantity)
                 
-                # Set reset flag to enable reset logic
-                self.pe_reset_gap_flag = 1
+                # If we're here, we found a suitable instrument with enough premium
                 break
+            
+            if instrument is None or iterations >= max_iterations:
+                logger.warning("Reached max iterations or no suitable instrument found in PE strike selection, skipping trade")
+                return
+
+            # Execute the trade
+            logger.info(f"Execute PE sell @ {instrument['symbol']} × {total_quantity}, Market Price")
+            self._place_order(instrument['symbol'], total_quantity)
+            
+            # Set reset flag to enable reset logic
+            self.pe_reset_gap_flag = 1
+            
 
     def _handle_ce_trade(self, current_price):
         """
@@ -325,33 +351,42 @@ class SurvivorStrategy:
 
             # Find suitable CE option with adequate premium
             temp_gap = self.strat_var_ce_symbol_gap 
-            while True:
+            max_iterations = 10
+            iterations = 0
+            instrument = None # Initialize instrument to None
+            while iterations < max_iterations:
+                iterations += 1
                 # Find CE instrument at specified gap from current price
                 instrument = self._find_nifty_symbol_from_gap("CE", current_price, gap=temp_gap)
                 if not instrument:
-                    logger.warning("No suitable instrument found for CE with gap %s", temp_gap)
-                    return
+                    logger.warning(f"No suitable instrument found for CE with gap {temp_gap}")
+                    break
                     
                 # Get current quote for the selected instrument
-                if ":" not in instrument['symbol']:
-                    symbol_code = self.strat_var_exchange + ":" + instrument['symbol']
-                else:
-                    symbol_code = instrument['symbol']
+                symbol_code = instrument['symbol']
                 quote = self.broker.get_quote(symbol_code)
                 # Check if premium meets minimum threshold
                 if quote.last_price < self.strat_var_min_price_to_sell:
                     logger.info(f"Last price {quote.last_price} is less than min price to sell {self.strat_var_min_price_to_sell}, trying next strike")
                     # Try closer strike if premium is too low
-                    temp_gap -= self.lot_size
+                    temp_gap -= self._get_strike_difference(self.symbol_initials)
+                    if temp_gap < 0:
+                        logger.warning(f"Gap reduced below 0 for CE, skipping trade")
+                        break
                     continue
                     
-                # Execute the trade
-                logger.info(f"Execute CE sell @ {instrument['symbol']} × {total_quantity}, Market Price")
-                self._place_order(instrument['symbol'], total_quantity)
-                
-                # Set reset flag to enable reset logic
-                self.ce_reset_gap_flag = 1
+                # If we're here, we found a suitable instrument with enough premium
                 break
+            
+            if instrument is None or iterations >= max_iterations:
+                logger.warning("Reached max iterations or no suitable instrument found in CE strike selection, skipping trade")
+                return
+
+            # Execute the trade
+            logger.info(f"Execute CE sell @ {instrument['symbol']} × {total_quantity}, Market Price")
+            self._place_order(instrument['symbol'], total_quantity)
+            # Set reset flag to enable reset logic
+            self.ce_reset_gap_flag = 1
 
     def _reset_reference_values(self, current_price):
         """
@@ -429,7 +464,7 @@ class SurvivorStrategy:
         
         # Filter instruments for matching criteria
         df = self.instruments[
-            (self.instruments['symbol'].str.contains(self.strat_var_symbol_initials)) &
+            (self.instruments['symbol'].str.contains(self.symbol_initials)) &
             (self.instruments['instrument_type'] == option_type) &
             (self.instruments['segment'] == "NFO-OPT")
         ]
@@ -441,11 +476,11 @@ class SurvivorStrategy:
         df['target_strike_diff'] = (df['strike'] - target_strike).abs()
         
         # Filter to strikes within half strike difference (tolerance for rounding)
-        tolerance = self._get_strike_difference(self.strat_var_symbol_initials) / 2
+        tolerance = self._get_strike_difference(self.symbol_initials) / 2
         df = df[df['target_strike_diff'] <= tolerance]
         
         if df.empty:
-            logger.error(f"No instrument found for {self.strat_var_symbol_initials} {option_type} "
+            logger.error(f"No instrument found for {self.symbol_initials} {option_type} "
                         f"within {tolerance} of {target_strike}")
             return None
             

@@ -53,4 +53,12 @@ def register_default_brokers() -> None:
         logging.error("Error registering fyrodha driver", exc_info=True)
         pass
 
+    try:
+        from .integrations.backtest.driver import BacktestDriver
+
+        BrokerRegistry.register("backtest", lambda: BacktestDriver())
+    except Exception:
+        logging.error("Error registering backtest driver", exc_info=True)
+        pass
+
 

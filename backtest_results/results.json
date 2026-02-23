@@ -1,0 +1,33 @@
+{
+    "initial_capital": 100000.0,
+    "final_equity": 100000.0,
+    "total_pnl": 0.0,
+    "total_pnl_percent": 0.0,
+    "total_trades": 2,
+    "trades": [
+        {
+            "order_id": "BT1",
+            "symbol": "NIFTY26FEB25350PE",
+            "exchange": "NFO",
+            "transaction_type": "SELL",
+            "quantity": 25,
+            "order_type": "MARKET",
+            "price": 193.3,
+            "status": "COMPLETE",
+            "timestamp": "2026-01-28T00:00:00",
+            "tag": "Survivor"
+        },
+        {
+            "order_id": "BT2",
+            "symbol": "NIFTY26FEB25400PE",
+            "exchange": "NFO",
+            "transaction_type": "SELL",
+            "quantity": 25,
+            "order_type": "MARKET",
+            "price": 163.1,
+            "status": "COMPLETE",
+            "timestamp": "2026-01-29T00:00:00",
+            "tag": "Survivor"
+        }
+    ]
+}
